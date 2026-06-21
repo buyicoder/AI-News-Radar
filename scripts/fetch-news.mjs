@@ -79,41 +79,21 @@ async function fetchHackerNews() {
   } catch(e) { console.error('HN fetch failed:', e.message); return []; }
 }
 
-// ====== AI 摘要 ======
+// ====== AI 摘要（Loop Engineering：Researcher → Writer → Reviewer） ======
 
 async function summarizeWithDeepSeek(items) {
-  if (!DEEPSEEK_KEY) { console.error('No DeepSeek key'); return items; }
+  if (!DEEPSEEK_KEY) { console.error('No DeepSeek key'); return items.map(i => `- [${i.source}] ${i.title}`).join('\n'); }
 
-  const prompt = `你是一个 AI 新闻编辑。以下是从多个来源收集的 AI 领域最新资讯。请：
+  // 使用子Agent管道
+  const { pipelineAgent } = await import('../../AIZZL/Jarvis/scripts/lib/subagents.mjs');
+  const sources = {
+    github: items.filter(i => i.source === 'GitHub Trending').map(i => ({ title: i.title, desc: i.desc, url: i.url, stars: i.stars })),
+    huggingface: items.filter(i => i.source === 'HuggingFace Daily Papers').map(i => ({ title: i.title, desc: i.desc, url: i.url, upvotes: i.upvotes })),
+    hackernews: items.filter(i => i.source === 'Hacker News').map(i => ({ title: i.title, url: i.url, score: i.score })),
+  };
 
-1. 去重——标题或内容相似的条目只保留一个
-2. 筛选——只保留真正重要的 10-15 条
-3. 分组——按类别分组（📰 新闻 / 📄 论文 / 🔧 开源项目）
-4. 每条用 1-2 句中文总结，保留原文链接
-5. 不重要或重复的条目直接丢弃
-
-原始资讯：
-${items.map((item, i) => `
-[${i+1}] [${item.source}] ${item.title}
-${item.desc || ''}
-${item.url}
-`).join('\n')}
-
-请输出结构化日报：`;
-
-  const res = await fetch(DEEPSEEK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_KEY}` },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.3,
-      max_tokens: 3000,
-    }),
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || 'AI 摘要生成失败';
+  console.log('  🧠 Researcher → Writer → Reviewer 管道...');
+  return await pipelineAgent('AI 领域最新资讯', sources);
 }
 
 // ====== 主流程 ======
