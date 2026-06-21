@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { execSync } from 'child_process';
 import { resolve } from 'path';
 import matter from 'gray-matter';
 
@@ -8,6 +9,20 @@ const DAILY_DIR = resolve(ROOT, 'daily');
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || process.env.ANTHROPIC_API_KEY || '';
 const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
+const PROXY = process.env.https_proxy || process.env.HTTPS_PROXY || 'http://127.0.0.1:7890';
+
+// Node.js 原生 fetch 在 Windows 上不自动走系统代理，被墙的请求用 curl 兜底
+function fetchBlocked(url, timeout = 15000) {
+  try {
+    const result = execSync(`curl -s --proxy ${PROXY} --connect-timeout 8 -m 12 "${url}"`, {
+      encoding: 'utf-8', timeout, maxBuffer: 5 * 1024 * 1024, windowsHide: true,
+    });
+    return { ok: true, json: () => JSON.parse(result), text: () => result };
+  } catch (e) {
+    return { ok: false, json: () => { throw e; }, text: () => '' };
+  }
+}
+function fetchDirect(url) { return fetch(url); }
 
 // ====== 数据源 ======
 
@@ -28,8 +43,7 @@ async function fetchGitHubTrending() {
 
 async function fetchHuggingFace() {
   try {
-    // 需要翻墙，确保 Clash 已开启系统代理
-    const res = await fetch('https://huggingface.co/api/daily_papers?limit=8');
+    const res = fetchBlocked('https://huggingface.co/api/daily_papers?limit=8');
     const data = await res.json();
     return (data||[]).slice(0,8).map(p => ({
       title: p.title || p.paper?.title || '',
@@ -43,21 +57,23 @@ async function fetchHuggingFace() {
 
 async function fetchHackerNews() {
   try {
-    const topRes = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
-    const ids = (await topRes.json()).slice(0, 30);
+    const topRes = fetchBlocked('https://hacker-news.firebaseio.com/v0/topstories.json', 10000);
+    const ids = topRes.json().slice(0, 12);
     const items = [];
-    for (const id of ids.slice(0, 15)) {
-      const itemRes = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
-      const item = await itemRes.json();
-      if (item && (item.title||'').toLowerCase().match(/ai|llm|gpt|model|openai|anthropic|deepseek|agent|ml/)) {
-        items.push({
-          title: item.title,
-          url: item.url || `https://news.ycombinator.com/item?id=${item.id}`,
-          desc: '',
-          score: item.score || 0,
-          source: 'Hacker News',
-        });
-      }
+    for (const id of ids) {
+      try {
+        const itemRes = fetchBlocked(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, 6000);
+        const item = itemRes.json();
+        if (item && (item.title||'').toLowerCase().match(/ai|llm|gpt|model|openai|anthropic|deepseek|agent|ml/)) {
+          items.push({
+            title: item.title,
+            url: item.url || `https://news.ycombinator.com/item?id=${item.id}`,
+            desc: '',
+            score: item.score || 0,
+            source: 'Hacker News',
+          });
+        }
+      } catch { /* skip failed items */ }
     }
     return items.slice(0, 8);
   } catch(e) { console.error('HN fetch failed:', e.message); return []; }
